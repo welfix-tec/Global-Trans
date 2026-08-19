@@ -6,7 +6,7 @@
 
 // Google Apps Script upload endpoint
 window.GOOGLE_APPS_SCRIPT_UPLOAD_URL =
-    'https://script.google.com/macros/s/AKfycbwDl0DgjPLh_1-uPD3qvjPUbLpWai0pBNO2OW0rd8zYWob1ysBki2WxYL8s6OnQNd01/exec';
+    'https://script.google.com/macros/s/AKfycby_-m36jfbfC_bwYHgFPC3jI0U1EBE_mReTpY3rVQnC7n3XMxGjeo1pESWsY1pCXc1dpQ/exec';
 
 // ── One-time cache purge for new Firebase project ─────────────
 // If the browser still has localStorage data from the old 3RAG project,
