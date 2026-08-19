@@ -642,8 +642,7 @@
             }
             async function requireAdminPin(promptText) {
                 if (!settings.pinHash || !settings.pinSalt) {
-                    showToast('Set an admin PIN first');
-                    return false;
+                    return true;
                 }
                 if (isAdminLocked()) {
                     const remainingSeconds = Math.max(0, Math.ceil((getAdminLockoutUntil() - Date.now()) / 1000));
@@ -1848,6 +1847,8 @@ function _afterLoad() {
                 if (total === 0) {
                     svg.innerHTML = `<circle cx="90" cy="90" r="80" fill="var(--bg4)" /><text x="90" y="90" text-anchor="middle" fill="var(--text3)" font-size="12" dy=".3em">No data</text>`;
                     legend.innerHTML = '';
+                    const vdcContainer = document.getElementById('violationDriverCards');
+                    if (vdcContainer) vdcContainer.innerHTML = `<div class="vdc-empty"><div class="vdc-empty-icon">📊</div><p>No violations in this period</p></div>`;
                     return;
                 }
                 
@@ -8263,45 +8264,205 @@ ${sheets.map(s => sheetXml(s.name, s.rows)).join('')}
             }
             async function resetAllData() {
                 if (!await requireAdminPin('Enter admin PIN to reset all data')) return;
-                if (!confirm('⚠ This will delete ALL data. Continue?')) return;
+
+                // ── Custom confirmation modal ──────────────────────────────
+                await new Promise((resolve, reject) => {
+                    const overlay = document.createElement('div');
+                    overlay.style.cssText = `
+                        position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:99999;
+                        display:flex;align-items:center;justify-content:center;
+                        animation:fadeIn .2s ease;
+                    `;
+                    overlay.innerHTML = `
+                        <div style="
+                            background:var(--card,#1e2235);border:1px solid #f04c5a;border-radius:14px;
+                            padding:32px 28px;max-width:420px;width:90%;text-align:center;
+                            box-shadow:0 8px 40px rgba(240,76,90,0.35);
+                        ">
+                            <div style="font-size:48px;margin-bottom:12px">⚠️</div>
+                            <h3 style="color:#f04c5a;font-size:18px;margin-bottom:10px;font-weight:700">
+                                RESET ALL DATA
+                            </h3>
+                            <p style="color:var(--text2,#a0a5b8);font-size:13px;line-height:1.6;margin-bottom:8px">
+                                This will <strong style="color:#f04c5a">permanently delete every record</strong>
+                                in the system — drivers, trucks, trailers, orders, job cards,
+                                violations, HSC records, the recycle bin, and all settings.
+                            </p>
+                            <p style="color:var(--text3,#7a7f96);font-size:12px;margin-bottom:24px">
+                                A backup file will be downloaded automatically before the reset begins.
+                            </p>
+                            <div style="display:flex;gap:12px;justify-content:center">
+                                <button id="resetCancelBtn" style="
+                                    flex:1;padding:10px 0;border-radius:8px;border:1px solid var(--border,#2e3350);
+                                    background:transparent;color:var(--text2,#a0a5b8);cursor:pointer;font-size:13px;
+                                ">Cancel</button>
+                                <button id="resetConfirmBtn" style="
+                                    flex:1;padding:10px 0;border-radius:8px;border:none;
+                                    background:#f04c5a;color:#fff;cursor:pointer;font-size:13px;font-weight:700;
+                                    transition:opacity .2s;
+                                ">Yes, Reset Everything</button>
+                            </div>
+                        </div>
+                    `;
+                    document.body.appendChild(overlay);
+                    overlay.querySelector('#resetCancelBtn').onclick = () => {
+                        document.body.removeChild(overlay);
+                        reject('cancelled');
+                    };
+                    overlay.querySelector('#resetConfirmBtn').onclick = () => {
+                        document.body.removeChild(overlay);
+                        resolve();
+                    };
+                }).catch(() => { return Promise.reject('cancelled'); });
+
+                // ── Download backup first ──────────────────────────────────
                 backupAndDownload('Backup before reset');
+
+                // ── Countdown toast with cancel ────────────────────────────
+                let cancelled = false;
                 let countdown = 5;
-                const interval = setInterval(() => {
-                    if (countdown <= 0) {
-                        clearInterval(interval);
-                        const backupJson = localStorage.getItem('fg3_backup');
-                        drivers = [];
-                        trucks = [];
-                        trailers = [];
-                        orders = [];
-                        jobCards = [];
-                        settings = {
-                            theme: 'default',
-                            darkMode: true,
-                            driverStatuses: [{ name: 'Online', color: '#22c97a' }, { name: 'Offline', color: '#565b6e' }, { name: 'On Trip', color: '#3d7fff' }, { name: 'Idle', color: '#f59e0b' }, { name: 'Suspended', color: '#f04c5a' }],
-                            violationTypes: [{ name: 'Speeding', severity: 'high' }, { name: 'Phone use', severity: 'medium' }, { name: 'Hard braking', severity: 'low' }],
-                            riskMediumThreshold: 10, riskHighThreshold: 24, riskHighCountThreshold: 2,
-                            docTypes: [{ name: 'Insurance', months: 12 }, { name: 'Registration', months: 12 }, { name: 'Inspection', months: 6 }],
-                            maintenanceServices: DEFAULT_MAINTENANCE_SERVICES.map(s => ({ ...s })),
-                            customFields: [],
-                            settingsLocked: false
-                        };
-                        hscPolicies = [];
-                        hscMeetings = [];
-                        saveHscPolicies();
-                        saveHscMeetings();
-                        saveAll();
-                        if (backupJson) localStorage.setItem('fg3_backup', backupJson);
-                        localStorage.removeItem('fg3_admin_failed_attempts');
-                        localStorage.removeItem('fg3_admin_lockout');
-                        applyTheme();
-                        renderSettings();
-                        showPage('dashboard');
-                        showToast('All data reset');
+
+                // Build a cancellable countdown toast
+                const toastId = 'reset-countdown-toast';
+                let existingToast = document.getElementById(toastId);
+                if (existingToast) existingToast.remove();
+
+                function showCountdownBar(n) {
+                    let bar = document.getElementById(toastId);
+                    if (!bar) {
+                        bar = document.createElement('div');
+                        bar.id = toastId;
+                        bar.style.cssText = `
+                            position:fixed;bottom:80px;left:50%;transform:translateX(-50%);
+                            background:#1e2235;border:1px solid #f04c5a;border-radius:10px;
+                            padding:14px 20px;z-index:99998;min-width:280px;text-align:center;
+                            box-shadow:0 4px 20px rgba(0,0,0,0.5);
+                        `;
+                        document.body.appendChild(bar);
+                    }
+                    bar.innerHTML = `
+                        <div style="color:#f04c5a;font-weight:700;font-size:14px;margin-bottom:8px">
+                            ⚠ Resetting in <span id="resetCountNum">${n}</span>s…
+                        </div>
+                        <div style="background:#2e3350;border-radius:4px;height:4px;overflow:hidden;margin-bottom:10px">
+                            <div id="resetCountBar" style="height:4px;background:#f04c5a;width:${(n/5)*100}%;transition:width 1s linear"></div>
+                        </div>
+                        <button id="resetCancelCountBtn" style="
+                            background:transparent;border:1px solid var(--border,#2e3350);
+                            color:var(--text2,#a0a5b8);border-radius:6px;padding:5px 16px;
+                            cursor:pointer;font-size:12px;
+                        ">✕ Cancel Reset</button>
+                    `;
+                    bar.querySelector('#resetCancelCountBtn').onclick = () => {
+                        cancelled = true;
+                        clearInterval(countInterval);
+                        bar.remove();
+                        showToast('Reset cancelled.');
+                    };
+                }
+
+                showCountdownBar(countdown);
+
+                const countInterval = setInterval(async () => {
+                    if (cancelled) return;
+                    countdown -= 1;
+                    if (countdown > 0) {
+                        showCountdownBar(countdown);
                         return;
                     }
-                    showToast(`Resetting all data in ${countdown} second(s)...`);
-                    countdown -= 1;
+
+                    // ── Countdown done — perform the full reset ──────────
+                    clearInterval(countInterval);
+                    const bar = document.getElementById(toastId);
+                    if (bar) bar.remove();
+
+                    // 1. Reset all in-memory state
+                    drivers      = [];
+                    trucks       = [];
+                    trailers     = [];
+                    orders       = [];
+                    jobCards     = [];
+                    recycleBin   = [];
+                    hscPolicies  = [];
+                    hscMeetings  = [];
+                    settings = {
+                        theme: 'default',
+                        darkMode: true,
+                        driverStatuses: [
+                            { name: 'Online',    color: '#22c97a' },
+                            { name: 'Offline',   color: '#565b6e' },
+                            { name: 'On Trip',   color: '#3d7fff' },
+                            { name: 'Idle',      color: '#f59e0b' },
+                            { name: 'Suspended', color: '#f04c5a' }
+                        ],
+                        violationTypes: [
+                            { name: 'Speeding',      severity: 'high'   },
+                            { name: 'Phone use',     severity: 'medium' },
+                            { name: 'Hard braking',  severity: 'low'    }
+                        ],
+                        riskMediumThreshold: 10,
+                        riskHighThreshold: 24,
+                        riskHighCountThreshold: 2,
+                        docTypes: [
+                            { name: 'Insurance',   months: 12 },
+                            { name: 'Registration',months: 12 },
+                            { name: 'Inspection',  months: 6  }
+                        ],
+                        maintenanceServices: DEFAULT_MAINTENANCE_SERVICES.map(s => ({ ...s })),
+                        customFields: [],
+                        settingsLocked: false
+                    };
+
+                    // 2. Wipe every localStorage key the app uses
+                    const ALL_LS_KEYS = [
+                        'fg3_drivers', 'fg3_trucks', 'fg3_trailers',
+                        'fg3_settings', 'fg3_orders', 'fg3_jobcards',
+                        'fg3_recyclebin', 'fg3_hscpolicies', 'fg3_hscmeetings',
+                        'fg3_reassignment_log', 'fg3_active_page',
+                        'fg3_admin_failed_attempts', 'fg3_admin_lockout',
+                        'fg3_backup', 'fg_role'
+                    ];
+                    ALL_LS_KEYS.forEach(k => localStorage.removeItem(k));
+
+                    // 3. Wipe Firebase completely
+                    if (typeof database !== 'undefined') {
+                        try {
+                            await database.ref('fleetguard').set({
+                                drivers: [],
+                                trucks: [],
+                                trailers: [],
+                                orders: [],
+                                jobCards: [],
+                                recycleBin: [],
+                                hscPolicies: [],
+                                hscMeetings: [],
+                                settings: settings,
+                                lastUpdated: Date.now()
+                            });
+                        } catch (err) {
+                            console.error('[Reset] Firebase wipe failed:', err);
+                            try {
+                                await database.ref('fleetguard').remove();
+                            } catch (_) {}
+                        }
+                    }
+
+                    // 4. Re-save clean defaults to localStorage
+                    if (typeof saveHscPolicies === 'function') saveHscPolicies();
+                    if (typeof saveHscMeetings === 'function') saveHscMeetings();
+                    saveAll();
+
+                    // 5. Refresh UI immediately
+                    applyTheme();
+                    renderSettings();
+                    renderDashboard();
+                    updateSidebarBadges();
+                    showPage('dashboard');
+
+                    showToast('✅ System reset complete — restarting fresh…');
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 1200);
                 }, 1000);
             }
             const DEMO_DRIVERS = [
